@@ -8,5 +8,6 @@
 		<logger level="INFO" doc:name="Logger" doc:id="3afec4bb-4657-4491-84a3-d22e18ec5927" />
 		<logger level="INFO" doc:name="Logger" doc:id="3ccef4c0-d550-4a20-b3f4-57670e253cd4" />
 		<logger level="INFO" doc:name="Logger" doc:id="712f3d48-26f7-4360-a924-dc8e648601df" />
+		<logger level="INFO" doc:name="Logger" doc:id="cf68495a-23f8-4a36-a26d-aa97c217d026" />
 	</flow>
 </mule>
