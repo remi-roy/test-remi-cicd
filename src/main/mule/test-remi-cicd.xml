@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<mule xmlns="http://www.mulesoft.org/schema/mule/core" xmlns:doc="http://www.mulesoft.org/schema/mule/documentation"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd">
+	<global-property doc:name="Global Property" doc:id="05640a41-cfa9-43cc-821e-12318157c973" name="mule.env" value="Sandbox" />
+	<flow name="test-remi-cicdFlow" doc:id="217aadb0-b9c9-4a17-b8e9-ab52d0c56e90" >
+		<logger level="INFO" doc:name="Logger" doc:id="3afec4bb-4657-4491-84a3-d22e18ec5927" />
+		<logger level="INFO" doc:name="Logger" doc:id="712f3d48-26f7-4360-a924-dc8e648601df" />
+	</flow>
+</mule>

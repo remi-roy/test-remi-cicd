@@ -1,0 +1,252 @@
+name: Build and Deploy Mule App
+
+on:
+  push:
+    branches: [ develop, features/* ]
+  pull_request:
+    branches: [ main ]
+    
+jobs:
+
+  set-env: 
+    runs-on: ubuntu-latest
+    outputs:
+      ENV: ${{ steps.set-vars.outputs.ENV }}
+      CH2_ENV: ${{ steps.set-vars.outputs.CH2_ENV }}
+      CHANGE_LIST: ${{ steps.set-vars.outputs.CHANGE_LIST }}
+      BUILD_ID: ${{ steps.set-vars.outputs.BUILD_ID }}
+      TARGET: ${{ steps.set-vars.outputs.TARGET }}
+      PUBLIC_URL: ${{ steps.set-vars.outputs.PUBLIC_URL }}
+    steps:
+      - name: Define variables according to branch
+        id: set-vars
+        run: |
+          if [[ "${GITHUB_REF}" == "refs/heads/develop" || "${GITHUB_REF}" == refs/heads/features/* ]]; then
+            echo "ENV=Sandbox" >> $GITHUB_OUTPUT
+            echo "CH2_ENV=SANDBOX" >> $GITHUB_OUTPUT
+            echo "CHANGE_LIST=-SNAPSHOT" >> $GITHUB_OUTPUT
+            short_sha=.${GITHUB_SHA:0:8}
+            echo "BUILD_ID=$short_sha" >> $GITHUB_OUTPUT
+            echo "TARGET=${{ vars.SANDBOX_PRIVATE_SPACE }}" >> $GITHUB_OUTPUT
+          elif [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            echo "ENV=Production" >> $GITHUB_OUTPUT
+            echo "CH2_ENV=PRODUCTION" >> $GITHUB_OUTPUT
+            echo "CHANGE_LIST=" >> $GITHUB_OUTPUT
+            echo "BUILD_ID=" >> $GITHUB_OUTPUT
+            echo "TARGET=${{ vars.PROD_PRIVATE_SPACE }}" >> $GITHUB_OUTPUT
+          fi
+          
+          if [[ ${GITHUB_REPOSITORY#*/} == *"exp"* ]]; then
+            echo "PUBLIC_URL=true" >> $GITHUB_OUTPUT
+          else
+            echo "PUBLIC_URL=false" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs: set-env
+    runs-on: ubuntu-latest
+    env: 
+      CHANGE_LIST: ${{ needs.set-env.outputs.CHANGE_LIST }}
+      BUILD_ID: ${{ needs.set-env.outputs.BUILD_ID }}
+      ENV: ${{ needs.set-env.outputs.ENV }}
+
+    steps:
+    - name: Checkout this repo
+      uses: actions/checkout@v3
+      
+    - name: Cache dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.m2/repository
+        key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+        restore-keys: |
+          ${{ runner.os }}-maven-
+
+    - name: Set up JDK 17
+      uses: actions/setup-java@v5
+      with:
+        distribution: 'temurin'
+        java-version: 17
+
+    - name: Create Maven settings.xml
+      run: |
+        mkdir -p ~/.m2
+        if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+          CONN_APP_ID="${{ secrets.PROD_CONNECTED_APP_ID }}"
+          CONN_APP_SEC="${{ secrets.PROD_CONNECTED_APP_SECRET }}"
+        else
+          CONN_APP_ID="${{ secrets.SANDBOX_CONNECTED_APP_ID }}"
+          CONN_APP_SEC="${{ secrets.SANDBOX_CONNECTED_APP_SECRET }}"
+        fi
+        cat > ~/.m2/settings.xml <<EOF
+        <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
+                              http://maven.apache.org/xsd/settings-1.0.0.xsd">
+          <servers>
+            <server>
+              <id>anypoint-exchange-v3</id>
+              <username>~~~Client~~~</username>
+              <password>${CONN_APP_ID}~?~${CONN_APP_SEC}</password>
+            </server>
+            <server>
+              <id>MuleRepository</id>
+              <username>~~~Client~~~</username>
+              <password>${CONN_APP_ID}~?~${CONN_APP_SEC}</password>
+            </server>
+          </servers>
+          <profiles>
+            <profile>
+              <activation>
+                <activeByDefault>true</activeByDefault>
+              </activation>
+              <repositories>
+                <repository>
+                  <id>anypoint-exchange-v3</id>
+                  <name>Anypoint Exchange</name>
+                  <url>https://maven.eu1.anypoint.mulesoft.com/api/v3/maven/</url>
+                </repository>
+                <repository>
+                  <id>mulesoft-releases</id>
+                  <name>MuleSoft Releases Repository</name>
+                  <url>https://repository.mulesoft.org/releases/</url>
+                </repository>
+                <repository>
+                  <id>maven-central</id>
+                  <name>Maven Central</name>
+                  <url>https://repo1.maven.org/maven2/</url>
+                </repository>
+              </repositories>
+              <id>mule-dev</id>
+            </profile>
+          </profiles>
+        </settings>
+        EOF
+
+    - name: Upload Maven Settings
+      uses: actions/upload-artifact@v4
+      with:
+        name: maven-settings
+        path: ~/.m2/settings.xml
+
+    - name: Extract Maven version
+      id: get_version
+      run: |
+        echo "Maven version extraction with help:evaluate"
+        if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+          NEW_VERSION=$(mvn help:evaluate -s ~/.m2/settings.xml -q -Dexpression='project.version' -DforceStdout -Dchangelist='' -Dsha1='')
+        else
+          NEW_VERSION=$(mvn help:evaluate -s ~/.m2/settings.xml -q -Dexpression='project.version' -DforceStdout -Dchangelist="$CHANGE_LIST" -Dsha1="$BUILD_ID")
+        fi
+        echo "New version variable is $NEW_VERSION"
+        echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+    - name: Set Maven Version
+      run: |
+        echo "Defining new version with mvn versions:set"
+        mvn versions:set -DnewVersion="${{ steps.get_version.outputs.NEW_VERSION }}" -q -s ~/.m2/settings.xml
+
+    - name: Deploy to Exchange
+      run: |
+        echo "Publishing application to Exchange"
+        mvn clean deploy -s ~/.m2/settings.xml -B -ntp -DskipTests
+
+    - name: Package with Maven
+      run: |
+        if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+          ENCRYPT_KEY="${{ secrets.PROD_ENCRYPTION_KEY }}"
+        else
+          ENCRYPT_KEY="${{ secrets.SANDBOX_ENCRYPTION_KEY }}"
+        fi
+        mvn -B package -s ~/.m2/settings.xml -Dmule.env="$ENV" -Dsecure.encryptionKey="$ENCRYPT_KEY" -DskipMunitTests
+        
+    - name: Stamp artifact file name with commit hash
+      run: |
+        artifactName1=$(ls target/*.jar | head -1)
+        commitHash=$(git rev-parse --short "$GITHUB_SHA")
+        artifactName2=$(ls target/*.jar | head -1 | sed "s/.jar/-$commitHash.jar/g")
+        mv $artifactName1 $artifactName2
+        
+    - name: Upload artifact 
+      uses: actions/upload-artifact@v4
+      with:
+          name: artifacts
+          path: target/*.jar
+        
+  deploy:
+    if: github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main'
+    needs: [set-env, build]
+    runs-on: ubuntu-latest
+    env: 
+      CHANGE_LIST: ${{ needs.set-env.outputs.CHANGE_LIST }}
+      BUILD_ID: ${{ needs.set-env.outputs.BUILD_ID }}
+      ENV: ${{ needs.set-env.outputs.ENV }}
+      CH2_ENV: ${{ needs.set-env.outputs.CH2_ENV }}
+      TARGET: ${{ needs.set-env.outputs.TARGET }}
+      PUBLIC_URL: ${{ needs.set-env.outputs.PUBLIC_URL }}
+    
+    steps:    
+    - name: Download Maven settings.xml
+      uses: actions/download-artifact@v4
+      with:
+        name: maven-settings
+        path: ~/.m2
+
+    - name: Checkout this repo
+      uses: actions/checkout@v3
+      
+    - name: Cache dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.m2/repository
+        key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+        restore-keys: |
+          ${{ runner.os }}-maven-
+          
+    - name: Download artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: artifacts
+
+    - name: Extract Maven version
+      id: get_version
+      run: |
+        echo "Maven version extraction with help:evaluate"
+        if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+          NEW_VERSION=$(mvn help:evaluate -s ~/.m2/settings.xml -q -Dexpression='project.version' -DforceStdout -Dchangelist='' -Dsha1='')
+        else
+          NEW_VERSION=$(mvn help:evaluate -s ~/.m2/settings.xml -q -Dexpression='project.version' -DforceStdout -Dchangelist="$CHANGE_LIST" -Dsha1="$BUILD_ID")
+        fi
+        echo "New version variable is $NEW_VERSION"
+        echo "NEW_VERSION=$NEW_VERSION" >> $GITHUB_OUTPUT
+
+    - name: Set Maven Version
+      run: |
+        echo "Defining new version avec mvn versions:set"
+        mvn versions:set -DnewVersion="${{ steps.get_version.outputs.NEW_VERSION }}" -q -s ~/.m2/settings.xml
+
+    - name: Deploy to CloudHub 2.0
+      run: |
+        if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+          ENCRYPT_KEY=${{ secrets.PROD_ENCRYPTION_KEY }}
+          CONN_APP_ID=${{ secrets.PROD_CONNECTED_APP_ID }}
+          CONN_APP_SEC=${{ secrets.PROD_CONNECTED_APP_SECRET }}
+        else
+          ENCRYPT_KEY=${{ secrets.SANDBOX_ENCRYPTION_KEY }}
+          CONN_APP_ID=${{ secrets.SANDBOX_CONNECTED_APP_ID }}
+          CONN_APP_SEC=${{ secrets.SANDBOX_CONNECTED_APP_SECRET }}
+        fi
+        artifactName=$(ls *.jar | head -1)
+        mvn mule:deploy -P ch2Deployment -s ~/.m2/settings.xml -DskipMunitTests \
+        -Dmule.artifact=$artifactName \
+        -DskipDeploymentVerification \
+        -Dmule.env="$ENV" \
+        -Dsecure.encryptionKey="$ENCRYPT_KEY" \
+        -Dch2.env="$CH2_ENV" \
+        -Ddeploy.env="${CH2_ENV,,}" \
+        -Dch2.target="$TARGET" \
+        -Dap.connectedAppClientId="$CONN_APP_ID" \
+        -Dap.connectedAppClientSecret="$CONN_APP_SEC" \
+        -DclientId="$CONN_APP_ID" \
+        -DclientSecret="$CONN_APP_SEC" \
+        -Dch2.secureEncryptionKey="$ENCRYPT_KEY"
